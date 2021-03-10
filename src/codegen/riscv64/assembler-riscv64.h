@@ -623,6 +623,8 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   void c_sw(Register rs2, Register rs1, uint16_t uimm7);
   void c_sd(Register rs2, Register rs1, uint16_t uimm8);
   void c_fsd(FPURegister rs2, Register rs1, uint16_t uimm8);
+  void NOP();
+  void EBREAK();
 
   // Privileged
   void uret();

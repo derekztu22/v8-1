@@ -315,8 +315,8 @@ void JumpTableAssembler::EmitLazyCompileJumpSlot(uint32_t func_index,
   // Jump produces max. 8 instructions (include constant pool and j)
   Jump(lazy_compile_target, RelocInfo::NONE);
   int nop_bytes = start + kLazyCompileTableSlotSize - pc_offset();
-  DCHECK_EQ(nop_bytes % kInstrSize, 0);
-  for (int i = 0; i < nop_bytes; i += kInstrSize) nop();
+  DCHECK_EQ(nop_bytes % kShortInstrSize, 0);
+  for (int i = 0; i < nop_bytes; i += kShortInstrSize) c_nop();
 }
 
 bool JumpTableAssembler::EmitJumpSlot(Address target) {
@@ -341,9 +341,9 @@ void JumpTableAssembler::PatchFarJumpSlot(Address slot, Address target) {
 
 void JumpTableAssembler::NopBytes(int bytes) {
   DCHECK_LE(0, bytes);
-  DCHECK_EQ(0, bytes % kInstrSize);
+  DCHECK_EQ(0, bytes % kShortInstrSize);
   for (; bytes > 0; bytes -= kInstrSize) {
-    nop();
+    c_nop();
   }
 }
 
