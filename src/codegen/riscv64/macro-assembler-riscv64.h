@@ -411,6 +411,13 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
   void instr(Register rs, Register rt) { instr(rs, Operand(rt)); } \
   void instr(Register rs, int32_t j) { instr(rs, Operand(j)); }
 
+#define DEFINE_INSTRUCTION3(instr)             \
+  void instr(Register target);                 \
+  void instr(Label* label);                    \
+  void instr(int32_t offset);                  \
+  void instr(Register target, int32_t offset); \
+  void instr(Register rd, int64_t imm);
+
   DEFINE_INSTRUCTION(Add32)
   DEFINE_INSTRUCTION(Add64)
   DEFINE_INSTRUCTION(Div32)
@@ -461,6 +468,13 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
 
   DEFINE_INSTRUCTION(Ror)
   DEFINE_INSTRUCTION(Dror)
+
+  DEFINE_INSTRUCTION3(Li)
+  DEFINE_INSTRUCTION2(Mv)
+  DEFINE_INSTRUCTION3(Jalr)
+  DEFINE_INSTRUCTION3(Jr)
+  DEFINE_INSTRUCTION3(J)
+
 #undef DEFINE_INSTRUCTION
 #undef DEFINE_INSTRUCTION2
 #undef DEFINE_INSTRUCTION3

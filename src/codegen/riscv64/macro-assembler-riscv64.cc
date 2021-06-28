@@ -142,7 +142,7 @@ void TurboAssembler::PushCommonFrame(Register marker_reg) {
     Add64(fp, sp, Operand(kSystemPointerSize));
   } else {
     Push(ra, fp);
-    mv(fp, sp);
+    Mv(fp, sp);
   }
 }
 
@@ -195,7 +195,7 @@ void MacroAssembler::RecordWriteField(Register object, int offset,
     DCHECK(!AreAliased(value, dst, scratch, object));
     And(scratch, dst, Operand(kTaggedSize - 1));
     Branch(&ok, eq, scratch, Operand(zero_reg));
-    ebreak();
+    EBREAK();
     bind(&ok);
   }
 
@@ -380,9 +380,19 @@ void MacroAssembler::RecordWrite(Register object, Register address,
 
 void TurboAssembler::Add32(Register rd, Register rs, const Operand& rt) {
   if (rt.is_reg()) {
-    addw(rd, rs, rt.rm());
+    if (FLAG_riscv_c_extension && (rd.code() == rs.code()) &&
+        ((rd.code() & 0b11000) == 0b01000) &&
+        ((rt.rm().code() & 0b11000) == 0b01000)) {
+      c_addw(rd, rt.rm());
+    } else {
+      addw(rd, rs, rt.rm());
+    }
   } else {
-    if (is_int12(rt.immediate()) && !MustUseReg(rt.rmode())) {
+    if (FLAG_riscv_c_extension && is_int6(rt.immediate()) &&
+        (rd.code() == rs.code()) && (rd != zero_reg) &&
+        !MustUseReg(rt.rmode())) {
+      c_addiw(rd, static_cast<int8_t>(rt.immediate()));
+    } else if (is_int12(rt.immediate()) && !MustUseReg(rt.rmode())) {
       addiw(rd, rs, static_cast<int32_t>(rt.immediate()));
     } else if ((-4096 <= rt.immediate() && rt.immediate() <= -2049) ||
                (2048 <= rt.immediate() && rt.immediate() <= 4094)) {
@@ -392,7 +402,7 @@ void TurboAssembler::Add32(Register rd, Register rs, const Operand& rt) {
       // li handles the relocation.
       UseScratchRegisterScope temps(this);
       Register scratch = temps.Acquire();
-      RV_li(scratch, rt.immediate());
+      Li(scratch, rt.immediate());
       addw(rd, rs, scratch);
     }
   }
@@ -400,9 +410,27 @@ void TurboAssembler::Add32(Register rd, Register rs, const Operand& rt) {
 
 void TurboAssembler::Add64(Register rd, Register rs, const Operand& rt) {
   if (rt.is_reg()) {
-    add(rd, rs, rt.rm());
+    if (FLAG_riscv_c_extension && (rd.code() == rs.code()) &&
+        (rt.rm() != zero_reg) && (rs != zero_reg)) {
+      c_add(rd, rt.rm());
+    } else {
+      add(rd, rs, rt.rm());
+    }
   } else {
-    if (is_int12(rt.immediate()) && !MustUseReg(rt.rmode())) {
+    if (FLAG_riscv_c_extension && is_int6(rt.immediate()) &&
+        (rd.code() == rs.code()) && (rd != zero_reg) && (rt.immediate() != 0) &&
+        !MustUseReg(rt.rmode())) {
+      c_addi(rd, static_cast<int8_t>(rt.immediate()));
+    } else if (FLAG_riscv_c_extension && is_int10(rt.immediate()) &&
+               (rt.immediate() != 0) && ((rt.immediate() & 0xf) == 0) &&
+               (rd.code() == rs.code()) && (rd == sp) &&
+               !MustUseReg(rt.rmode())) {
+      c_addi16sp(static_cast<int16_t>(rt.immediate()));
+    } else if (FLAG_riscv_c_extension && ((rd.code() & 0b11000) == 0b01000) &&
+               (rs == sp) && is_uint10(rt.immediate()) &&
+               (rt.immediate() != 0) && !MustUseReg(rt.rmode())) {
+      c_addi4spn(rd, static_cast<uint16_t>(rt.immediate()));
+    } else if (is_int12(rt.immediate()) && !MustUseReg(rt.rmode())) {
       addi(rd, rs, static_cast<int32_t>(rt.immediate()));
     } else if ((-4096 <= rt.immediate() && rt.immediate() <= -2049) ||
                (2048 <= rt.immediate() && rt.immediate() <= 4094)) {
@@ -413,7 +441,7 @@ void TurboAssembler::Add64(Register rd, Register rs, const Operand& rt) {
       UseScratchRegisterScope temps(this);
       Register scratch = temps.Acquire();
       BlockTrampolinePoolScope block_trampoline_pool(this);
-      RV_li(scratch, rt.immediate());
+      Li(scratch, rt.immediate());
       add(rd, rs, scratch);
     }
   }
@@ -421,10 +449,23 @@ void TurboAssembler::Add64(Register rd, Register rs, const Operand& rt) {
 
 void TurboAssembler::Sub32(Register rd, Register rs, const Operand& rt) {
   if (rt.is_reg()) {
-    subw(rd, rs, rt.rm());
+    if (FLAG_riscv_c_extension && (rd.code() == rs.code()) &&
+        ((rd.code() & 0b11000) == 0b01000) &&
+        ((rt.rm().code() & 0b11000) == 0b01000)) {
+      c_subw(rd, rt.rm());
+    } else {
+      subw(rd, rs, rt.rm());
+    }
   } else {
     DCHECK(is_int32(rt.immediate()));
-    if (is_int12(-rt.immediate()) && !MustUseReg(rt.rmode())) {
+    if (FLAG_riscv_c_extension && (rd.code() == rs.code()) &&
+        (rd != zero_reg) && is_int6(-rt.immediate()) &&
+        !MustUseReg(rt.rmode())) {
+      c_addiw(
+          rd,
+          static_cast<int8_t>(
+              -rt.immediate()));  // No c_subiw instr, use c_addiw(x, y, -imm).
+    } else if (is_int12(-rt.immediate()) && !MustUseReg(rt.rmode())) {
       addiw(rd, rs,
             static_cast<int32_t>(
                 -rt.immediate()));  // No subiw instr, use addiw(x, y, -imm).
@@ -437,11 +478,11 @@ void TurboAssembler::Sub32(Register rd, Register rs, const Operand& rt) {
       Register scratch = temps.Acquire();
       if (-rt.immediate() >> 12 == 0 && !MustUseReg(rt.rmode())) {
         // Use load -imm and addu when loading -imm generates one instruction.
-        RV_li(scratch, -rt.immediate());
+        Li(scratch, -rt.immediate());
         addw(rd, rs, scratch);
       } else {
         // li handles the relocation.
-        RV_li(scratch, rt.immediate());
+        Li(scratch, rt.immediate());
         subw(rd, rs, scratch);
       }
     }
@@ -450,7 +491,25 @@ void TurboAssembler::Sub32(Register rd, Register rs, const Operand& rt) {
 
 void TurboAssembler::Sub64(Register rd, Register rs, const Operand& rt) {
   if (rt.is_reg()) {
-    sub(rd, rs, rt.rm());
+    if (FLAG_riscv_c_extension && (rd.code() == rs.code()) &&
+        ((rd.code() & 0b11000) == 0b01000) &&
+        ((rt.rm().code() & 0b11000) == 0b01000)) {
+      c_sub(rd, rt.rm());
+    } else {
+      sub(rd, rs, rt.rm());
+    }
+  } else if (FLAG_riscv_c_extension && (rd.code() == rs.code()) &&
+             (rd != zero_reg) && is_int6(-rt.immediate()) &&
+             (rt.immediate() != 0) && !MustUseReg(rt.rmode())) {
+    c_addi(rd,
+           static_cast<int8_t>(
+               -rt.immediate()));  // No c_subi instr, use c_addi(x, y, -imm).
+
+  } else if (FLAG_riscv_c_extension && is_int10(-rt.immediate()) &&
+             (rt.immediate() != 0) && ((rt.immediate() & 0xf) == 0) &&
+             (rd.code() == rs.code()) && (rd == sp) &&
+             !MustUseReg(rt.rmode())) {
+    c_addi16sp(static_cast<int16_t>(-rt.immediate()));
   } else if (is_int12(-rt.immediate()) && !MustUseReg(rt.rmode())) {
     addi(rd, rs,
          static_cast<int32_t>(
@@ -467,13 +526,13 @@ void TurboAssembler::Sub64(Register rd, Register rs, const Operand& rt) {
       DCHECK(rt.immediate() != std::numeric_limits<int32_t>::min());
       UseScratchRegisterScope temps(this);
       Register scratch = temps.Acquire();
-      RV_li(scratch, -rt.immediate());
+      Li(scratch, -rt.immediate());
       add(rd, rs, scratch);
     } else {
       // li handles the relocation.
       UseScratchRegisterScope temps(this);
       Register scratch = temps.Acquire();
-      RV_li(scratch, rt.immediate());
+      Li(scratch, rt.immediate());
       sub(rd, rs, scratch);
     }
   }
@@ -486,7 +545,7 @@ void TurboAssembler::Mul32(Register rd, Register rs, const Operand& rt) {
     // li handles the relocation.
     UseScratchRegisterScope temps(this);
     Register scratch = temps.Acquire();
-    RV_li(scratch, rt.immediate());
+    Li(scratch, rt.immediate());
     mulw(rd, rs, scratch);
   }
 }
@@ -498,7 +557,7 @@ void TurboAssembler::Mulh32(Register rd, Register rs, const Operand& rt) {
     // li handles the relocation.
     UseScratchRegisterScope temps(this);
     Register scratch = temps.Acquire();
-    RV_li(scratch, rt.immediate());
+    Li(scratch, rt.immediate());
     mul(rd, rs, scratch);
   }
   srai(rd, rd, 32);
@@ -507,10 +566,11 @@ void TurboAssembler::Mulh32(Register rd, Register rs, const Operand& rt) {
 void TurboAssembler::Mulhu32(Register rd, Register rs, const Operand& rt,
                              Register rsz, Register rtz) {
   slli(rsz, rs, 32);
-  if (rt.is_reg())
+  if (rt.is_reg()) {
     slli(rtz, rt.rm(), 32);
-  else
-    RV_li(rtz, rt.immediate() << 32);
+  } else {
+    Li(rtz, rt.immediate() << 32);
+  }
   mulhu(rd, rsz, rtz);
   srai(rd, rd, 32);
 }
@@ -522,7 +582,7 @@ void TurboAssembler::Mul64(Register rd, Register rs, const Operand& rt) {
     // li handles the relocation.
     UseScratchRegisterScope temps(this);
     Register scratch = temps.Acquire();
-    RV_li(scratch, rt.immediate());
+    Li(scratch, rt.immediate());
     mul(rd, rs, scratch);
   }
 }
@@ -534,7 +594,7 @@ void TurboAssembler::Mulh64(Register rd, Register rs, const Operand& rt) {
     // li handles the relocation.
     UseScratchRegisterScope temps(this);
     Register scratch = temps.Acquire();
-    RV_li(scratch, rt.immediate());
+    Li(scratch, rt.immediate());
     mulh(rd, rs, scratch);
   }
 }
@@ -546,7 +606,7 @@ void TurboAssembler::Div32(Register res, Register rs, const Operand& rt) {
     // li handles the relocation.
     UseScratchRegisterScope temps(this);
     Register scratch = temps.Acquire();
-    RV_li(scratch, rt.immediate());
+    Li(scratch, rt.immediate());
     divw(res, rs, scratch);
   }
 }
@@ -558,7 +618,7 @@ void TurboAssembler::Mod32(Register rd, Register rs, const Operand& rt) {
     // li handles the relocation.
     UseScratchRegisterScope temps(this);
     Register scratch = temps.Acquire();
-    RV_li(scratch, rt.immediate());
+    Li(scratch, rt.immediate());
     remw(rd, rs, scratch);
   }
 }
@@ -570,7 +630,7 @@ void TurboAssembler::Modu32(Register rd, Register rs, const Operand& rt) {
     // li handles the relocation.
     UseScratchRegisterScope temps(this);
     Register scratch = temps.Acquire();
-    RV_li(scratch, rt.immediate());
+    Li(scratch, rt.immediate());
     remuw(rd, rs, scratch);
   }
 }
@@ -582,7 +642,7 @@ void TurboAssembler::Div64(Register rd, Register rs, const Operand& rt) {
     // li handles the relocation.
     UseScratchRegisterScope temps(this);
     Register scratch = temps.Acquire();
-    RV_li(scratch, rt.immediate());
+    Li(scratch, rt.immediate());
     div(rd, rs, scratch);
   }
 }
@@ -594,7 +654,7 @@ void TurboAssembler::Divu32(Register res, Register rs, const Operand& rt) {
     // li handles the relocation.
     UseScratchRegisterScope temps(this);
     Register scratch = temps.Acquire();
-    RV_li(scratch, rt.immediate());
+    Li(scratch, rt.immediate());
     divuw(res, rs, scratch);
   }
 }
@@ -606,7 +666,7 @@ void TurboAssembler::Divu64(Register res, Register rs, const Operand& rt) {
     // li handles the relocation.
     UseScratchRegisterScope temps(this);
     Register scratch = temps.Acquire();
-    RV_li(scratch, rt.immediate());
+    Li(scratch, rt.immediate());
     divu(res, rs, scratch);
   }
 }
@@ -618,7 +678,7 @@ void TurboAssembler::Mod64(Register rd, Register rs, const Operand& rt) {
     // li handles the relocation.
     UseScratchRegisterScope temps(this);
     Register scratch = temps.Acquire();
-    RV_li(scratch, rt.immediate());
+    Li(scratch, rt.immediate());
     rem(rd, rs, scratch);
   }
 }
@@ -630,22 +690,32 @@ void TurboAssembler::Modu64(Register rd, Register rs, const Operand& rt) {
     // li handles the relocation.
     UseScratchRegisterScope temps(this);
     Register scratch = temps.Acquire();
-    RV_li(scratch, rt.immediate());
+    Li(scratch, rt.immediate());
     remu(rd, rs, scratch);
   }
 }
 
 void TurboAssembler::And(Register rd, Register rs, const Operand& rt) {
   if (rt.is_reg()) {
-    and_(rd, rs, rt.rm());
+    if (FLAG_riscv_c_extension && (rd.code() == rs.code()) &&
+        ((rd.code() & 0b11000) == 0b01000) &&
+        ((rt.rm().code() & 0b11000) == 0b01000)) {
+      c_and(rd, rt.rm());
+    } else {
+      and_(rd, rs, rt.rm());
+    }
   } else {
-    if (is_int12(rt.immediate()) && !MustUseReg(rt.rmode())) {
+    if (FLAG_riscv_c_extension && is_uint6(rt.immediate()) &&
+        !MustUseReg(rt.rmode()) && (rd.code() == rs.code()) &&
+        ((rd.code() & 0b11000) == 0b01000)) {
+      c_andi(rd, static_cast<int8_t>(rt.immediate()));
+    } else if (is_int12(rt.immediate()) && !MustUseReg(rt.rmode())) {
       andi(rd, rs, static_cast<int32_t>(rt.immediate()));
     } else {
       // li handles the relocation.
       UseScratchRegisterScope temps(this);
       Register scratch = temps.Acquire();
-      RV_li(scratch, rt.immediate());
+      Li(scratch, rt.immediate());
       and_(rd, rs, scratch);
     }
   }
@@ -653,7 +723,13 @@ void TurboAssembler::And(Register rd, Register rs, const Operand& rt) {
 
 void TurboAssembler::Or(Register rd, Register rs, const Operand& rt) {
   if (rt.is_reg()) {
-    or_(rd, rs, rt.rm());
+    if (FLAG_riscv_c_extension && (rd.code() == rs.code()) &&
+        ((rd.code() & 0b11000) == 0b01000) &&
+        ((rt.rm().code() & 0b11000) == 0b01000)) {
+      c_or(rd, rt.rm());
+    } else {
+      or_(rd, rs, rt.rm());
+    }
   } else {
     if (is_int12(rt.immediate()) && !MustUseReg(rt.rmode())) {
       ori(rd, rs, static_cast<int32_t>(rt.immediate()));
@@ -661,7 +737,7 @@ void TurboAssembler::Or(Register rd, Register rs, const Operand& rt) {
       // li handles the relocation.
       UseScratchRegisterScope temps(this);
       Register scratch = temps.Acquire();
-      RV_li(scratch, rt.immediate());
+      Li(scratch, rt.immediate());
       or_(rd, rs, scratch);
     }
   }
@@ -669,7 +745,13 @@ void TurboAssembler::Or(Register rd, Register rs, const Operand& rt) {
 
 void TurboAssembler::Xor(Register rd, Register rs, const Operand& rt) {
   if (rt.is_reg()) {
-    xor_(rd, rs, rt.rm());
+    if (FLAG_riscv_c_extension && (rd.code() == rs.code()) &&
+        ((rd.code() & 0b11000) == 0b01000) &&
+        ((rt.rm().code() & 0b11000) == 0b01000)) {
+      c_xor(rd, rt.rm());
+    } else {
+      xor_(rd, rs, rt.rm());
+    }
   } else {
     if (is_int12(rt.immediate()) && !MustUseReg(rt.rmode())) {
       xori(rd, rs, static_cast<int32_t>(rt.immediate()));
@@ -677,7 +759,7 @@ void TurboAssembler::Xor(Register rd, Register rs, const Operand& rt) {
       // li handles the relocation.
       UseScratchRegisterScope temps(this);
       Register scratch = temps.Acquire();
-      RV_li(scratch, rt.immediate());
+      Li(scratch, rt.immediate());
       xor_(rd, rs, scratch);
     }
   }
@@ -747,7 +829,7 @@ void TurboAssembler::Slt(Register rd, Register rs, const Operand& rt) {
       UseScratchRegisterScope temps(this);
       Register scratch = temps.Acquire();
       BlockTrampolinePoolScope block_trampoline_pool(this);
-      RV_li(scratch, rt.immediate());
+      Li(scratch, rt.immediate());
       slt(rd, rs, scratch);
     }
   }
@@ -764,7 +846,7 @@ void TurboAssembler::Sltu(Register rd, Register rs, const Operand& rt) {
       UseScratchRegisterScope temps(this);
       Register scratch = temps.Acquire();
       BlockTrampolinePoolScope block_trampoline_pool(this);
-      RV_li(scratch, rt.immediate());
+      Li(scratch, rt.immediate());
       sltu(rd, rs, scratch);
     }
   }
@@ -778,7 +860,7 @@ void TurboAssembler::Sle(Register rd, Register rs, const Operand& rt) {
     UseScratchRegisterScope temps(this);
     Register scratch = temps.Acquire();
     BlockTrampolinePoolScope block_trampoline_pool(this);
-    RV_li(scratch, rt.immediate());
+    Li(scratch, rt.immediate());
     slt(rd, scratch, rs);
   }
   xori(rd, rd, 1);
@@ -792,7 +874,7 @@ void TurboAssembler::Sleu(Register rd, Register rs, const Operand& rt) {
     UseScratchRegisterScope temps(this);
     Register scratch = temps.Acquire();
     BlockTrampolinePoolScope block_trampoline_pool(this);
-    RV_li(scratch, rt.immediate());
+    Li(scratch, rt.immediate());
     sltu(rd, scratch, rs);
   }
   xori(rd, rd, 1);
@@ -816,7 +898,7 @@ void TurboAssembler::Sgt(Register rd, Register rs, const Operand& rt) {
     UseScratchRegisterScope temps(this);
     Register scratch = temps.Acquire();
     BlockTrampolinePoolScope block_trampoline_pool(this);
-    RV_li(scratch, rt.immediate());
+    Li(scratch, rt.immediate());
     slt(rd, scratch, rs);
   }
 }
@@ -829,7 +911,7 @@ void TurboAssembler::Sgtu(Register rd, Register rs, const Operand& rt) {
     UseScratchRegisterScope temps(this);
     Register scratch = temps.Acquire();
     BlockTrampolinePoolScope block_trampoline_pool(this);
-    RV_li(scratch, rt.immediate());
+    Li(scratch, rt.immediate());
     sltu(rd, scratch, rs);
   }
 }
@@ -864,6 +946,10 @@ void TurboAssembler::Srl32(Register rd, Register rs, const Operand& rt) {
 void TurboAssembler::Sra64(Register rd, Register rs, const Operand& rt) {
   if (rt.is_reg()) {
     sra(rd, rs, rt.rm());
+  } else if (FLAG_riscv_c_extension && (rd.code() == rs.code()) &&
+             ((rd.code() & 0b11000) == 0b01000) && is_uint6(rt.immediate())) {
+    uint8_t shamt = static_cast<uint8_t>(rt.immediate());
+    c_srai(rd, shamt);
   } else {
     uint8_t shamt = static_cast<uint8_t>(rt.immediate());
     srai(rd, rs, shamt);
@@ -873,6 +959,10 @@ void TurboAssembler::Sra64(Register rd, Register rs, const Operand& rt) {
 void TurboAssembler::Srl64(Register rd, Register rs, const Operand& rt) {
   if (rt.is_reg()) {
     srl(rd, rs, rt.rm());
+  } else if (FLAG_riscv_c_extension && (rd.code() == rs.code()) &&
+             ((rd.code() & 0b11000) == 0b01000) && is_uint6(rt.immediate())) {
+    uint8_t shamt = static_cast<uint8_t>(rt.immediate());
+    c_srli(rd, shamt);
   } else {
     uint8_t shamt = static_cast<uint8_t>(rt.immediate());
     srli(rd, rs, shamt);
@@ -884,7 +974,60 @@ void TurboAssembler::Sll64(Register rd, Register rs, const Operand& rt) {
     sll(rd, rs, rt.rm());
   } else {
     uint8_t shamt = static_cast<uint8_t>(rt.immediate());
-    slli(rd, rs, shamt);
+    if (FLAG_riscv_c_extension && (rd.code() == rs.code()) &&
+        (rd != zero_reg) && (shamt != 0) && is_uint6(shamt)) {
+      c_slli(rd, shamt);
+    } else {
+      slli(rd, rs, shamt);
+    }
+  }
+}
+
+void TurboAssembler::Li(Register rd, int64_t imm) {
+  if (FLAG_riscv_c_extension && (rd != zero_reg) && is_int6(imm)) {
+    c_li(rd, imm);
+  } else {
+    Li(rd, imm);
+  }
+}
+
+void TurboAssembler::Mv(Register rd, const Operand& rt) {
+  if (FLAG_riscv_c_extension && (rd != zero_reg) && (rt.rm() != zero_reg)) {
+    c_mv(rd, rt.rm());
+  } else {
+    mv(rd, rt.rm());
+  }
+}
+
+void TurboAssembler::Jr(Register target) {
+  if (FLAG_riscv_c_extension && (target != zero_reg)) {
+    c_jr(target);
+  } else {
+    jr(target);
+  }
+}
+
+void TurboAssembler::Jalr(Register target, int32_t offset) {
+  if (FLAG_riscv_c_extension && (target != zero_reg)) {
+    c_jalr(target);
+  } else {
+    jalr(ra, target, offset);
+  }
+}
+
+void TurboAssembler::J(int32_t offset) {
+  if (FLAG_riscv_c_extension && is_int12(offset)) {
+    c_j(offset);
+  } else {
+    j(offset);
+  }
+}
+
+void TurboAssembler::J(Label* label) {
+  if (FLAG_riscv_c_extension && is_int12(cjump_offset(label))) {
+    c_j(label);
+  } else {
+    j(label);
   }
 }
 
@@ -901,7 +1044,7 @@ void TurboAssembler::Ror(Register rd, Register rs, const Operand& rt) {
   } else {
     int64_t ror_value = rt.immediate() % 32;
     if (ror_value == 0) {
-      mv(rd, rs);
+      Mv(rd, rs);
       return;
     } else if (ror_value < 0) {
       ror_value += 32;
@@ -925,7 +1068,7 @@ void TurboAssembler::Dror(Register rd, Register rs, const Operand& rt) {
   } else {
     int64_t dror_value = rt.immediate() % 64;
     if (dror_value == 0) {
-      mv(rd, rs);
+      Mv(rd, rs);
       return;
     } else if (dror_value < 0) {
       dror_value += 64;
@@ -1305,7 +1448,17 @@ void TurboAssembler::Sh(Register rd, const MemOperand& rs) {
 
 void TurboAssembler::Lw(Register rd, const MemOperand& rs) {
   auto fn = [this](Register target, const MemOperand& source) {
-    this->lw(target, source.rm(), source.offset());
+    if (FLAG_riscv_c_extension && ((target.code() & 0b11000) == 0b01000) &&
+        ((source.rm().code() & 0b11000) == 0b01000) &&
+        is_uint7(source.offset()) && ((source.offset() & 0x3) == 0)) {
+      this->c_lw(target, source.rm(), source.offset());
+    } else if (FLAG_riscv_c_extension && (target != zero_reg) &&
+               is_uint8(source.offset()) && (source.rm() == sp) &&
+               ((source.offset() & 0x3) == 0)) {
+      this->c_lwsp(target, source.offset());
+    } else {
+      this->lw(target, source.rm(), source.offset());
+    }
   };
   AlignedLoadHelper(rd, rs, fn);
 }
@@ -1319,21 +1472,49 @@ void TurboAssembler::Lwu(Register rd, const MemOperand& rs) {
 
 void TurboAssembler::Sw(Register rd, const MemOperand& rs) {
   auto fn = [this](Register value, const MemOperand& source) {
-    this->sw(value, source.rm(), source.offset());
+    if (FLAG_riscv_c_extension && ((value.code() & 0b11000) == 0b01000) &&
+        ((source.rm().code() & 0b11000) == 0b01000) &&
+        is_uint7(source.offset()) && ((source.offset() & 0x3) == 0)) {
+      this->c_sw(value, source.rm(), source.offset());
+    } else if (FLAG_riscv_c_extension && (source.rm() == sp) &&
+               is_uint8(source.offset()) && (((source.offset() & 0x3) == 0))) {
+      this->c_swsp(value, source.offset());
+    } else {
+      this->sw(value, source.rm(), source.offset());
+    }
   };
   AlignedStoreHelper(rd, rs, fn);
 }
 
 void TurboAssembler::Ld(Register rd, const MemOperand& rs) {
   auto fn = [this](Register target, const MemOperand& source) {
-    this->ld(target, source.rm(), source.offset());
+    if (FLAG_riscv_c_extension && ((target.code() & 0b11000) == 0b01000) &&
+        ((source.rm().code() & 0b11000) == 0b01000) &&
+        is_uint8(source.offset()) && ((source.offset() & 0x7) == 0)) {
+      this->c_ld(target, source.rm(), source.offset());
+    } else if (FLAG_riscv_c_extension && (target != zero_reg) &&
+               is_uint9(source.offset()) && (source.rm() == sp) &&
+               ((source.offset() & 0x7) == 0)) {
+      this->c_ldsp(target, source.offset());
+    } else {
+      this->ld(target, source.rm(), source.offset());
+    }
   };
   AlignedLoadHelper(rd, rs, fn);
 }
 
 void TurboAssembler::Sd(Register rd, const MemOperand& rs) {
   auto fn = [this](Register value, const MemOperand& source) {
-    this->sd(value, source.rm(), source.offset());
+    if (FLAG_riscv_c_extension && ((value.code() & 0b11000) == 0b01000) &&
+        ((source.rm().code() & 0b11000) == 0b01000) &&
+        is_uint8(source.offset()) && ((source.offset() & 0x7) == 0)) {
+      this->c_sd(value, source.rm(), source.offset());
+    } else if (FLAG_riscv_c_extension && (source.rm() == sp) &&
+               is_uint9(source.offset()) && ((source.offset() & 0x7) == 0)) {
+      this->c_sdsp(value, source.offset());
+    } else {
+      this->sd(value, source.rm(), source.offset());
+    }
   };
   AlignedStoreHelper(rd, rs, fn);
 }
@@ -1354,14 +1535,32 @@ void TurboAssembler::StoreFloat(FPURegister fs, const MemOperand& src) {
 
 void TurboAssembler::LoadDouble(FPURegister fd, const MemOperand& src) {
   auto fn = [this](FPURegister target, const MemOperand& source) {
-    this->fld(target, source.rm(), source.offset());
+    if (FLAG_riscv_c_extension && ((target.code() & 0b11000) == 0b01000) &&
+        ((source.rm().code() & 0b11000) == 0b01000) &&
+        is_uint8(source.offset()) && ((source.offset() & 0x7) == 0)) {
+      this->c_fld(target, source.rm(), source.offset());
+    } else if (FLAG_riscv_c_extension && (source.rm() == sp) &&
+               is_uint9(source.offset()) && ((source.offset() & 0x7) == 0)) {
+      this->c_fldsp(target, source.offset());
+    } else {
+      this->fld(target, source.rm(), source.offset());
+    }
   };
   AlignedLoadHelper(fd, src, fn);
 }
 
 void TurboAssembler::StoreDouble(FPURegister fs, const MemOperand& src) {
   auto fn = [this](FPURegister value, const MemOperand& source) {
-    this->fsd(value, source.rm(), source.offset());
+    if (FLAG_riscv_c_extension && ((value.code() & 0b11000) == 0b01000) &&
+        ((source.rm().code() & 0b11000) == 0b01000) &&
+        is_uint8(source.offset()) && ((source.offset() & 0x7) == 0)) {
+      this->c_fsd(value, source.rm(), source.offset());
+    } else if (FLAG_riscv_c_extension && (source.rm() == sp) &&
+               is_uint9(source.offset()) && ((source.offset() & 0x7) == 0)) {
+      this->c_fsdsp(value, source.offset());
+    } else {
+      this->fsd(value, source.rm(), source.offset());
+    }
   };
   AlignedStoreHelper(fs, src, fn);
 }
@@ -1471,7 +1670,7 @@ void TurboAssembler::li_optimized(Register rd, Operand j, LiFlags mode) {
   DCHECK(!j.is_reg());
   DCHECK(!MustUseReg(j.rmode()));
   DCHECK(mode == OPTIMIZE_SIZE);
-  RV_li(rd, j.immediate());
+  Li(rd, j.immediate());
 }
 
 void TurboAssembler::li(Register rd, Operand j, LiFlags mode) {
@@ -1489,10 +1688,10 @@ void TurboAssembler::li(Register rd, Operand j, LiFlags mode) {
       ld(rd, rd, 0);
     } else {
       if ((count - reverse_count) > 1) {
-        RV_li(rd, ~j.immediate());
+        Li(rd, ~j.immediate());
         not_(rd, rd);
       } else {
-        RV_li(rd, j.immediate());
+        Li(rd, j.immediate());
       }
     }
   } else if (MustUseReg(j.rmode())) {
@@ -3194,13 +3393,13 @@ void TurboAssembler::StoreReturnAddressAndCall(Register target) {
   // Note that this assumes the caller code (i.e. the Code object currently
   // being generated) is immovable or that the callee function cannot trigger
   // GC, since the callee function will return to it.
-
+  //
   // Compute the return address in lr to return to after the jump below. The
   // pc is already at '+ 8' from the current instruction; but return is after
   // three instructions, so add another 4 to pc to get the return address.
-
+  //
   Assembler::BlockTrampolinePoolScope block_trampoline_pool(this);
-  static constexpr int kNumInstructionsToJump = 5;
+  static constexpr int kNumInstructionsToJump = 4;
   Label find_ra;
   // Adjust the value in ra to point to the correct return location, one
   // instruction past the real call into C code (the jalr(t6)), and push it.
@@ -3217,7 +3416,7 @@ void TurboAssembler::StoreReturnAddressAndCall(Register target) {
   // Stack is still aligned.
 
   // Call the C routine.
-  mv(t6,
+  Mv(t6,
      target);  // Function pointer to t6 to conform to ABI for PIC.
   jalr(t6);
   // Make sure the stored 'ra' points to this position.
@@ -3310,9 +3509,9 @@ void MacroAssembler::Swap(Register reg1, Register reg2, Register scratch) {
     Xor(reg2, reg2, Operand(reg1));
     Xor(reg1, reg1, Operand(reg2));
   } else {
-    mv(scratch, reg1);
-    mv(reg1, reg2);
-    mv(reg2, scratch);
+    Mv(scratch, reg1);
+    Mv(reg1, reg2);
+    Mv(reg2, scratch);
   }
 }
 
@@ -3346,7 +3545,7 @@ void TurboAssembler::PushArray(Register array, Register size,
   Register scratch2 = temps.Acquire();
   Label loop, entry;
   if (order == PushArrayOrder::kReverse) {
-    mv(scratch, zero_reg);
+    Mv(scratch, zero_reg);
     jmp(&entry);
     bind(&loop);
     CalcScaledAddress(scratch2, array, scratch, kSystemPointerSizeLog2);
@@ -3356,7 +3555,7 @@ void TurboAssembler::PushArray(Register array, Register size,
     bind(&entry);
     Branch(&loop, less, scratch, Operand(size));
   } else {
-    mv(scratch, size);
+    Mv(scratch, size);
     jmp(&entry);
     bind(&loop);
     CalcScaledAddress(scratch2, array, scratch, kSystemPointerSizeLog2);
@@ -3490,7 +3689,7 @@ void TurboAssembler::PrepareForTailCall(Register callee_args_count,
   Branch(&loop, ne, sp, Operand(src_reg));
 
   // Leave current frame.
-  mv(sp, dst_reg);
+  Mv(sp, dst_reg);
 }
 
 void MacroAssembler::LoadStackLimit(Register destination, StackLimitKind kind) {
@@ -3771,7 +3970,7 @@ void TurboAssembler::AddOverflow64(Register dst, Register left,
     xor_(overflow, scratch2, left);
     xor_(scratch, scratch2, right_reg);
     and_(overflow, overflow, scratch);
-    mv(dst, scratch2);
+    Mv(dst, scratch2);
   } else {
     add(dst, left, right_reg);
     xor_(overflow, dst, left);
@@ -3803,7 +4002,7 @@ void TurboAssembler::SubOverflow64(Register dst, Register left,
     xor_(overflow, left, scratch2);
     xor_(scratch, left, right_reg);
     and_(overflow, overflow, scratch);
-    mv(dst, scratch2);
+    Mv(dst, scratch2);
   } else {
     sub(dst, left, right_reg);
     xor_(overflow, left, dst);
@@ -3953,7 +4152,7 @@ void TurboAssembler::Abort(AbortReason reason) {
 
   // Avoid emitting call to builtin if requested.
   if (trap_on_abort()) {
-    ebreak();
+    EBREAK();
     return;
   }
 
@@ -3988,7 +4187,7 @@ void TurboAssembler::Abort(AbortReason reason) {
     int abort_instructions = InstructionsGeneratedSince(&abort_start);
     DCHECK_LE(abort_instructions, kExpectedAbortInstructions);
     while (abort_instructions++ < kExpectedAbortInstructions) {
-      nop();
+      NOP();
     }
   }
 }
@@ -4151,7 +4350,7 @@ void MacroAssembler::LeaveExitFrame(bool save_doubles, Register argument_count,
   }
 
   // Pop the arguments, restore registers, and return.
-  mv(sp, fp);  // Respect ABI stack constraint.
+  Mv(sp, fp);  // Respect ABI stack constraint.
   Ld(fp, MemOperand(sp, ExitFrameConstants::kCallerFPOffset));
   Ld(ra, MemOperand(sp, ExitFrameConstants::kCallerPCOffset));
 
@@ -4201,7 +4400,7 @@ void MacroAssembler::AssertStackIsAligned() {
         Branch(&alignment_as_expected, eq, scratch, Operand(zero_reg));
       }
       // Don't use Check here, as it will call Runtime_Abort re-entering here.
-      ebreak();
+      EBREAK();
       bind(&alignment_as_expected);
     }
   }
@@ -4453,7 +4652,7 @@ void TurboAssembler::PrepareCallCFunction(int num_reg_arguments,
   if (frame_alignment > kSystemPointerSize) {
     // Make stack end at alignment and make room for stack arguments and the
     // original value of sp.
-    mv(scratch, sp);
+    Mv(scratch, sp);
     Sub64(sp, sp, Operand((stack_passed_arguments + 1) * kSystemPointerSize));
     DCHECK(base::bits::IsPowerOfTwo(frame_alignment));
     And(sp, sp, Operand(-frame_alignment));
@@ -4516,7 +4715,7 @@ void TurboAssembler::CallCFunctionHelper(Register function,
       }
       // Don't use Check here, as it will call Runtime_Abort possibly
       // re-entering here.
-      ebreak();
+      EBREAK();
       bind(&alignment_as_expected);
     }
   }
@@ -4527,7 +4726,7 @@ void TurboAssembler::CallCFunctionHelper(Register function,
   // stays correct.
   {
     if (function != t6) {
-      mv(t6, function);
+      Mv(t6, function);
       function = t6;
     }
 
